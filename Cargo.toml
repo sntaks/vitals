@@ -1,0 +1,17 @@
+[package]
+name = "vitals"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sysinfo = "0.33"
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+
+# Making the final program small and fast
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
