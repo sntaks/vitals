@@ -13,7 +13,7 @@
 
 use super::text::{fit, paint};
 use crate::anim::Tween;
-use crate::config::{FADE, TOP_N, TRANSITION};
+use crate::config::TOP_N;
 use crate::format::human;
 use crate::sampler::ProcRow;
 use crate::theme::{level_color, MUTED, TEXT};
@@ -97,16 +97,17 @@ impl ProcTable {
         }
     }
 
-    /// Advance all animations by `dt` seconds. Returns true while anything is still moving.
-    pub fn step(&mut self, dt: f32) -> bool {
+    /// Advance all animations by `dt` seconds of `transition`-second moves and
+    /// `fade`-second fades. Returns true while anything is still moving.
+    pub fn step(&mut self, dt: f32, transition: f32, fade: f32) -> bool {
         let mut moving = false;
         for row in &mut self.rows {
             // `|`, not `||`: every tween must step.
-            moving |= row.slot.step(dt, TRANSITION)
-                | row.alpha.step(dt, FADE)
-                | row.cpu.step(dt, TRANSITION)
-                | row.mem.step(dt, TRANSITION)
-                | row.io.step(dt, TRANSITION);
+            moving |= row.slot.step(dt, transition)
+                | row.alpha.step(dt, fade)
+                | row.cpu.step(dt, transition)
+                | row.mem.step(dt, transition)
+                | row.io.step(dt, transition);
         }
         // Forget rows that have finished fading out.
         self.rows.retain(|r| r.live || r.alpha.value() > 0.0);
@@ -199,14 +200,19 @@ fn paint_name(painter: &egui::Painter, r: Rect, row: &Row, font: &FontId, small:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{FADE, TRANSITION};
 
     fn proc(name: &str, cpu: f32) -> ProcRow {
         ProcRow { name: name.to_owned(), count: 1, cpu, mem: 0, io: 0.0 }
     }
 
+    fn step(t: &mut ProcTable) -> bool {
+        t.step(1.0 / 60.0, TRANSITION, FADE)
+    }
+
     fn settle(t: &mut ProcTable) {
         for _ in 0..600 {
-            t.step(1.0 / 60.0);
+            step(t);
         }
     }
 
@@ -231,11 +237,11 @@ mod tests {
         t.update(&[proc("a", 50.0), proc("b", 10.0)]);
         settle(&mut t);
         t.update(&[proc("a", 50.0)]);
-        t.step(1.0 / 60.0);
+        step(&mut t);
         assert_eq!(t.rows.len(), 2, "should still be fading");
         settle(&mut t);
         assert_eq!(t.rows.len(), 1);
-        assert!(!t.step(1.0 / 60.0), "should be at rest");
+        assert!(!step(&mut t), "should be at rest");
     }
 
     #[test]
@@ -243,7 +249,7 @@ mod tests {
         let mut t = ProcTable::default();
         t.update(&[proc("a", 50.0)]);
         t.update(&[]);
-        t.step(1.0 / 60.0);
+        step(&mut t);
         t.update(&[proc("a", 50.0)]);
         assert_eq!(t.rows.len(), 1);
         settle(&mut t);

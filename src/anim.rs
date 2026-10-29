@@ -43,13 +43,15 @@ impl Tween {
         }
     }
 
-    /// Advance by `dt` seconds of a `duration`-second transition. Returns true while still moving.
+    /// Advance by `dt` seconds of a `duration`-second transition. Returns true while
+    /// another frame is needed: false once `value()` has landed on the target, so the
+    /// frame that draws the final value is the last one. A `duration` of 0 lands at once.
     pub fn step(&mut self, dt: f32, duration: f32) -> bool {
         if self.progress >= 1.0 {
             return false;
         }
         self.progress = (self.progress + dt / duration.max(1e-4)).min(1.0);
-        true
+        self.progress < 1.0
     }
 }
 
@@ -81,7 +83,7 @@ mod tests {
             frames += 1;
         }
         assert_eq!(t.value(), 100.0);
-        assert!((30..=31).contains(&frames), "took {frames} frames");
+        assert!((29..=30).contains(&frames), "took {frames} frames");
         assert!(!t.step(DT, 0.5));
     }
 
@@ -106,6 +108,14 @@ mod tests {
         t.set(10.0);
         assert_eq!(t.value(), shown);
         assert!(t.step(DT, 0.5));
+    }
+
+    #[test]
+    fn zero_duration_lands_in_one_step_without_another_frame() {
+        let mut t = Tween::new(0.0);
+        t.set(42.0);
+        assert!(!t.step(DT, 0.0));
+        assert_eq!(t.value(), 42.0);
     }
 
     #[test]
