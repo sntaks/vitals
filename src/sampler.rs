@@ -4,12 +4,17 @@
 //! Flow: [`spawn`] starts a thread that owns a [`Sampler`]. Every [`REFRESH`] it
 //! takes a [`Sample`], sends it down a channel and pokes the UI to repaint.
 //! The UI picks samples up in `app.rs` and never touches sysinfo itself.
+//!
+//! While the window is hidden nobody sees the numbers, so the thread parks
+//! (see [`Pause`]) instead of walking every process each second.
 
 use crate::config::{REFRESH, TOP_N};
 use eframe::egui;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::thread;
+use std::sync::Arc;
+use std::thread::{self, Thread};
 use std::time::Instant;
 use sysinfo::{
     CpuRefreshKind, Disks, MemoryRefreshKind, Networks, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System,
@@ -62,6 +67,8 @@ struct Sampler {
     /// When the previous refresh happened. Counters are deltas since then, so
     /// dividing by the elapsed time turns them into per-second rates.
     last: Instant,
+    /// Upper-case drive Windows is installed on, e.g. "C:". Unused on other OSes.
+    system_drive: String,
 }
 
 impl Sampler {
@@ -72,17 +79,21 @@ impl Sampler {
                 .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
                 .with_memory(MemoryRefreshKind::nothing().with_ram()),
         );
-        let mut sampler = Self {
+        Self {
             sys,
             networks: Networks::new_with_refreshed_list(),
             disks: Disks::new_with_refreshed_list(),
             last: Instant::now(),
-        };
-        // Prime the counters. CPU usage and per-process I/O are deltas between two
-        // refreshes; on the very first one sysinfo reports lifetime totals instead.
-        sampler.refresh_os();
-        sampler.last = Instant::now();
-        sampler
+            system_drive: std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned()).to_uppercase(),
+        }
+    }
+
+    /// Resets the counters. CPU usage and per-process I/O are deltas between two
+    /// refreshes; on the very first one sysinfo reports lifetime totals instead, and
+    /// after a long pause they'd be an average over the whole pause.
+    fn prime(&mut self) {
+        self.refresh_os();
+        self.last = Instant::now();
     }
 
     /// Asks the OS for fresh numbers. Expensive part: walks every process.
@@ -115,13 +126,14 @@ impl Sampler {
             up += data.transmitted();
         }
 
-        // Disk space of the main drive ("/" on Linux, "C:\" on Windows).
+        // Disk space of the main drive: "/" on Linux and macOS, the drive Windows is
+        // installed on (%SystemDrive%, usually "C:") on Windows.
         let (disk_used, disk_total) = self
             .disks
             .iter()
             .find(|d| {
                 let m = d.mount_point().to_string_lossy();
-                m == "/" || m.to_uppercase().starts_with("C:")
+                m == "/" || m.to_uppercase().starts_with(&self.system_drive)
             })
             .or_else(|| self.disks.iter().next())
             .map(|d| (d.total_space().saturating_sub(d.available_space()), d.total_space()))
@@ -189,18 +201,56 @@ fn top_groups(mut groups: Vec<ProcRow>) -> Vec<ProcRow> {
     groups
 }
 
+/// Switches the sampler thread on and off. Cheap to clone.
+/// Only the Windows tray hides the window, so other platforms never use it.
+#[derive(Clone)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub struct Pause {
+    awake: Arc<AtomicBool>,
+    thread: Thread,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Pause {
+    /// Resume sampling. The first reading arrives ~200 ms later.
+    pub fn wake(&self) {
+        if !self.awake.swap(true, Ordering::AcqRel) {
+            self.thread.unpark();
+        }
+    }
+
+    /// Stop sampling after the current reading, until [`Pause::wake`].
+    pub fn pause(&self) {
+        self.awake.store(false, Ordering::Release);
+    }
+}
+
 /// Starts sampling every [`REFRESH`] on its own thread. The thread wakes the UI
 /// after each reading and exits on its own once the receiver is dropped.
-pub fn spawn(ctx: egui::Context) -> Receiver<Sample> {
+/// `awake: false` starts it paused (the window starts hidden).
+pub fn spawn(ctx: egui::Context, awake: bool) -> (Receiver<Sample>, Pause) {
     let (tx, rx) = mpsc::channel();
-    thread::Builder::new()
+    let flag = Arc::new(AtomicBool::new(awake));
+    let awake = Arc::clone(&flag);
+    let handle = thread::Builder::new()
         .name("vitals-sampler".into())
         .spawn(move || {
             let mut sampler = Sampler::new();
-            // Shortest wait sysinfo needs for meaningful CPU numbers, so the first reading shows up fast.
-            thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
+            let mut primed = false;
             let mut next = Instant::now();
             loop {
+                // Parked while hidden. Spurious wake-ups just loop back here.
+                while !awake.load(Ordering::Acquire) {
+                    primed = false;
+                    thread::park();
+                }
+                if !primed {
+                    sampler.prime();
+                    // Shortest wait sysinfo needs for meaningful CPU numbers, so the first reading shows up fast.
+                    thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
+                    primed = true;
+                    next = Instant::now();
+                }
                 // Sending fails only when the app has closed and dropped the receiver: stop.
                 if tx.send(sampler.sample()).is_err() {
                     break;
@@ -219,7 +269,7 @@ pub fn spawn(ctx: egui::Context) -> Receiver<Sample> {
             }
         })
         .expect("failed to start sampler thread");
-    rx
+    (rx, Pause { awake: flag, thread: handle.thread().clone() })
 }
 
 #[cfg(test)]

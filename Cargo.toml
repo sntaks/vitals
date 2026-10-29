@@ -15,3 +15,16 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# Tray icon, single instance and settings are Windows-only. On Linux tray-icon
+# needs GTK, which would make the build much heavier.
+[target.'cfg(windows)'.dependencies]
+tray-icon = { version = "0.26", default-features = false }
+raw-window-handle = "0.6" # already pulled in by eframe; used to get the window's HWND
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Security", # needed by CreateMutexW
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
